@@ -1,1 +1,1 @@
-![Video_title](demo.mp4)
+![](demo.mp4)
