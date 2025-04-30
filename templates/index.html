@@ -1,0 +1,172 @@
+<!DOCTYPE html>
+<html><head><meta charset="utf-8"><title>2D Car Game</title>
+<style>
+  body{margin:0;overflow:hidden;background:#333}
+  canvas{position:absolute;top:0;left:0}
+  #info{position:absolute;top:10px;left:10px;color:#ff0;
+    background:rgba(0,0,0,0.7);padding:5px;font-family:monospace;z-index:2}
+  #restart{position:absolute;top:10px;right:10px;z-index:2;
+    padding:6px 12px;font-size:14px}
+</style>
+</head><body>
+<canvas id="canvas"></canvas>
+<div id="info">Connecting...</div>
+<button id="restart">Restart</button>
+<script>
+const canvas = document.getElementById("canvas"),
+      ctx = canvas.getContext("2d");
+function resize(){ canvas.width = window.innerWidth; canvas.height = window.innerHeight; }
+window.addEventListener("resize", resize); resize();
+
+let fpsCount = 0, fps = 0;
+setInterval(()=>{ fps = fpsCount; fpsCount = 0 }, 1000);
+
+const info = document.getElementById("info");
+const source = new EventSource("/stream");
+let state = null;
+source.onopen  = () => info.textContent = `Connected — 0 fps`;
+source.onerror = () => info.textContent = "Disconnected";
+source.onmessage = e => {
+  fpsCount++;
+  state = JSON.parse(e.data);
+  info.textContent = `Connected — ${fps} fps`;
+};
+
+// Объект для хранения текущего состояния клавиш
+const keysState = {
+  ArrowLeft: false,
+  ArrowRight: false,
+  ArrowUp: false
+};
+
+function updateInput() {
+  fetch("/input",{
+    method:"POST",
+    headers:{"Content-Type":"application/json"},
+    body: JSON.stringify({
+      left: keysState.ArrowLeft,
+      right: keysState.ArrowRight,
+      forward: keysState.ArrowUp
+    })
+  });
+}
+
+document.addEventListener("keydown", e => {
+  if (keysState.hasOwnProperty(e.key)) {
+    keysState[e.key] = true;
+    updateInput();
+  }
+});
+
+document.addEventListener("keyup", e => {
+  if (keysState.hasOwnProperty(e.key)) {
+    keysState[e.key] = false;
+    updateInput();
+  }
+});
+
+document.getElementById("restart").onclick = () => fetch("/restart",{method:"POST"});
+
+function raycast(x,y,angle,segments,maxDist){
+  const dx=Math.cos(angle)*maxDist, dy=Math.sin(angle)*maxDist;
+  let closest={x:x+dx,y:y+dy,dist:Infinity};
+  segments.forEach(s=>{
+    const r_px=x, r_py=y, r_dx=dx, r_dy=dy;
+    const s_px=s.x1, s_py=s.y1, s_dx=s.x2-s.x1, s_dy=s.y2-s.y1;
+    const denom = s_dx*r_dy - s_dy*r_dx;
+    if(Math.abs(denom)<1e-6) return;
+    const t2 = (r_dx*(s_py-r_py)+r_dy*(r_px-s_px))/denom;
+    const t1 = (s_px+s_dx*t2-r_px)/r_dx;
+    if(t1>0 && t2>=0 && t2<=1 && t1<closest.dist) {
+      closest={x:r_px+r_dx*t1, y:r_py+r_dy*t1, dist:t1};
+    }
+  });
+  return closest;
+}
+
+function buildSegments(obs){
+  const segs=[];
+  obs.forEach(o=>{
+    const [t,x,y,s]=o;
+    const pts = t==="square"
+      ? [[0,0],[s,0],[s,s],[0,s]]
+      : [[0,0],[s,0],[s/2,-s]];
+    const abs = pts.map(p=>[p[0]+x,p[1]+y]);
+    abs.forEach((a,i)=>{
+      const b=abs[(i+1)%abs.length];
+      segs.push({x1:a[0],y1:a[1],x2:b[0],y2:b[1]});
+    });
+  });
+  return segs;
+}
+
+function render(){
+  if(state){
+    ctx.clearRect(0,0,canvas.width,canvas.height);
+    // draw obstacles
+    ctx.fillStyle="#555";
+    state.obstacles.forEach(o=>{
+      const [t,x,y,s]=o;
+      if(t==="square") ctx.fillRect(x,y,s,s);
+      else{
+        ctx.beginPath();ctx.moveTo(x,y);
+        ctx.lineTo(x+s,y);
+        ctx.lineTo(x+s/2,y-s);
+        ctx.closePath();ctx.fill();
+      }
+    });
+    // draw cars
+    state.cars.forEach(c=>{
+      ctx.save();
+      ctx.translate(c.x,c.y);
+      ctx.rotate(c.angle);
+      ctx.fillStyle = (c.id===state.player)?"#f00":"#00f";
+      ctx.fillRect(-c.w/2,-c.h/2,c.w,c.h);
+      c.heads = [[c.w/2,-c.h/2+2],[c.w/2,c.h/2-6]];
+      ctx.restore();
+    });
+    const segments = buildSegments(state.obstacles);
+    // dark overlay
+    ctx.fillStyle = "rgba(0,0,0,0.5)";
+    ctx.fillRect(0,0,canvas.width,canvas.height);
+    // carve darkness
+    ctx.globalCompositeOperation = "destination-out";
+    state.cars.forEach(c=>{
+      c.heads.forEach(off=>{
+        const ox = c.x + Math.cos(c.angle)*off[0] - Math.sin(c.angle)*off[1];
+        const oy = c.y + Math.sin(c.angle)*off[0] + Math.cos(c.angle)*off[1];
+        ctx.beginPath(); ctx.moveTo(ox,oy);
+        const spread=Math.PI/10, rays=30, maxD=500;
+        for(let i=0;i<=rays;i++){
+          const ang = c.angle - spread + (i/rays)*(2*spread);
+          const hit = raycast(ox,oy,ang,segments,maxD);
+          ctx.lineTo(hit.x,hit.y);
+        }
+        ctx.closePath(); ctx.fill();
+      });
+    });
+    // draw light beams
+    ctx.globalCompositeOperation = "lighter";
+    state.cars.forEach(c=>{
+      const bright = (c.id===state.player)?0.3:0.15;
+      ctx.fillStyle = `rgba(255,255,100,${bright})`;
+      c.heads.forEach(off=>{
+        const ox = c.x + Math.cos(c.angle)*off[0] - Math.sin(c.angle)*off[1];
+        const oy = c.y + Math.sin(c.angle)*off[0] + Math.cos(c.angle)*off[1];
+        ctx.beginPath(); ctx.moveTo(ox,oy);
+        const spread=Math.PI/10, rays=30, maxD=500;
+        for(let i=0;i<=rays;i++){
+          const ang = c.angle - spread + (i/rays)*(2*spread);
+          const hit = raycast(ox,oy,ang,segments,maxD);
+          ctx.lineTo(hit.x,hit.y);
+        }
+        ctx.closePath(); ctx.fill();
+      });
+    });
+    ctx.globalCompositeOperation = "source-over";
+  }
+  requestAnimationFrame(render);
+}
+render();
+</script>
+</body></html>
